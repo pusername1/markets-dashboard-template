@@ -1,0 +1,50 @@
+name: Fetch FRED series (cache to /data/fred)
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # hourly
+  workflow_dispatch:
+
+jobs:
+  fred:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      FRED_SERIES: DGS5,SP500,IRLTLT01CZM156N
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Fetch and write JSON
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          set -e
+          python - << 'PY'
+          import os, json, requests
+          os.makedirs('data/fred', exist_ok=True)
+          key = os.environ.get('FRED_API_KEY')
+          series = [s.strip() for s in os.environ.get('FRED_SERIES','').split(',') if s.strip()]
+          base = 'https://api.stlouisfed.org/fred/series/observations'
+          for sid in series:
+              if not key:
+                  with open(f'data/fred/{sid}.json','w') as f:
+                      json.dump({'series_id':sid,'observations':[]}, f)
+                  continue
+              r = requests.get(base, params={'series_id':sid,'api_key':key,'file_type':'json','observation_start':'1900-01-01'}, timeout=60)
+              r.raise_for_status()
+              j = r.json()
+              out = {'series_id':sid,'observations':[]}
+              for o in j.get('observations', []):
+                  try: out['observations'].append({'date': o['date'], 'value': float(o['value'])})
+                  except: pass
+              with open(f'data/fred/{sid}.json','w') as f: json.dump(out, f)
+          PY
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(data): refresh FRED cache"
+          file_pattern: data/fred/*.json
