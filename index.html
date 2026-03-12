@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Markets</title>
+<link rel="manifest" href="data:application/manifest+json,{&quot;name&quot;:&quot;Markets&quot;,&quot;short_name&quot;:&quot;Markets&quot;,&quot;display&quot;:&quot;standalone&quot;}" />
+<meta name="theme-color" content="#0e1116" />
+<style>
+  :root{--bg:#0e1116;--card:#171b22;--text:#e6e6e6;--muted:#aab3c0;--ok:#5ace84;--bad:#ff7070;--border:#263040;--accent:#4ea1ff}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,Segoe UI,Roboto,Arial}
+  header,footer{padding:10px 14px;border-bottom:1px solid var(--border)} footer{border-top:1px solid var(--border);border-bottom:none;color:var(--muted)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  input,button,select{background:#12161c;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px}
+  input[type="search"]{min-width:260px;flex:1}
+  .grid{display:grid;gap:12px;padding:12px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px}
+  .tile-title{font-weight:600}
+  .big{font-size:1.25rem;font-weight:600}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  .muted{color:var(--muted);font-size:12px}
+  .chip{background:#12161c;border:1px dashed var(--border);border-radius:999px;padding:6px 10px;cursor:pointer}
+  .suggest{position:absolute;background:var(--card);border:1px solid var(--border);border-radius:8px;margin-top:4px;max-height:240px;overflow:auto;z-index:10;min-width:300px}
+  .suggest div{padding:8px;border-bottom:1px solid var(--border);cursor:pointer}
+  .suggest div:hover{background:#0f141b}
+  #chart{height:360px}
+  .right{margin-left:auto}
+  .btn{cursor:pointer}
+  .badge{border:1px solid var(--border);border-radius:6px;padding:2px 6px;font-size:12px;color:var(--muted)}
+  .kbd{font-family:monospace;border:1px solid var(--border);border-radius:4px;padding:2px 6px;background:#0c1016;color:#cbd3de}
+</style>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<header class="row">
+  <strong style="font-size:16px">Markets</strong>
+  <div class="row" style="position:relative;flex:1;min-width:280px">
+    <input id="q" type="search" placeholder="Search instrument (e.g., AAPL, ^SPX, EURUSD, US5Y, GDP_US_CN)" autocomplete="off" />
+    <div id="suggest" class="suggest" style="display:none"></div>
+  </div>
+  <div class="row" id="rangeChips">
+    <button class="chip" data-range="1D">1D</button>
+    <button class="chip" data-range="5D">5D</button>
+    <button class="chip" data-range="MTD">MTD</button>
+    <button class="chip" data-range="QTD">QTD</button>
+    <button class="chip" data-range="YTD">YTD</button>
+    <button class="chip" data-range="1Y" style="border-style:solid">1Y</button>
+    <button class="chip" data-range="5Y">5Y</button>
+    <button class="chip" data-range="MAX">Max</button>
+  </div>
+  <button id="install" class="chip right">Install</button>
+</header>
+
+<section class="row" style="gap:8px;padding:10px 12px;flex-wrap:wrap">
+  <div class="muted">Quick add:</div>
+  <div id="chips" class="row" style="gap:6px"></div>
+  <button id="pinManage" class="chip">Customize</button>
+</section>
+
+<section id="cards" class="grid"></section>
+
+<section class="card" style="margin:12px">
+  <div class="row" style="justify-content:space-between">
+    <div>
+      <span id="detailTitle" class="tile-title">Chart</span>
+      <span id="detailBadge" class="badge" style="margin-left:6px;display:none"></span>
+    </div>
+    <div class="row">
+      <button id="btnCompare" class="chip">Compare</button>
+      <button id="btnExport" class="chip">Export PNG</button>
+    </div>
+  </div>
+  <div id="chart"></div>
+</section>
+
+<footer>
+  Data sources: <span class="badge">Stooq · EOD</span> <span class="badge">FRED · cached</span> <span class="badge">World Bank · annual</span>.
+</footer>
+
+<script>
+// -------------------- Utilities --------------------
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const today = new Date();
+const pad = n => String(n).padStart(2,'0');
+const fmtDate = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const startOfMonth = d => new Date(d.getFullYear(), d.getMonth(), 1);
+const startOfQuarter = d => new Date(d.getFullYear(), Math.floor(d.getMonth()/3)*3, 1);
+const startOfYear = d => new Date(d.getFullYear(), 0, 1);
+function pct(a,b){ return ((b-a)/a)*100; }
+function toSeries(arr){ return arr.map(p=>({ time: p.time, value: +p.value })).filter(x=>!isNaN(x.value)); }
+function cutByRange(arr, range){
+  const d = new Date();
+  let start;
+  if (range==='1D') start=new Date(d-1*24*3600*1000);
+  else if (range==='5D') start=new Date(d-5*24*3600*1000);
+  else if (range==='MTD') start=startOfMonth(d);
+  else if (range==='QTD') start=startOfQuarter(d);
+  else if (range==='YTD') start=startOfYear(d);
+  else if (range==='1Y') start=new Date(d.getFullYear()-1, d.getMonth(), d.getDate());
+  else if (range==='5Y') start=new Date(d.getFullYear()-5, d.getMonth(), d.getDate());
+  else start=new Date(0);
+  return arr.filter(p => new Date(p.time) >= start);
+}
+
+// -------------------- Data fetchers --------------------
+// Stooq EOD CSV (e.g., AAPL.US, ^SPX, CL.F)
+async function fetchStooq(sym) {
+  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(sym.toLowerCase())}&i=d`;
+  const txt = await (await fetch(url)).text();
+  const lines = txt.trim().split('\n'); if (lines.length<2) throw new Error('No data');
+  const data = lines.slice(1).map(l=>{
+    const [date,open,high,low,close] = l.split(',');
+    return { time: date, value: parseFloat(close) };
+  }).filter(x=>!isNaN(x.value));
+  return { series: data, meta: { source:'Stooq', latency:'EOD' } };
+}
+
+// FRED cached JSON: /data/fred/<series>.json
+async function fetchFRED(seriesId) {
+  const url = `/data/fred/${seriesId}.json?ts=${Date.now()}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('No cached FRED');
+  const j = await r.json();
+  const data = (j.observations||[]).map(o => ({ time:o.date, value:+o.value })).filter(x=>!isNaN(x.value));
+  return { series: data, meta: { source:'FRED', latency:'cached' } };
+}
+
+// World Bank: GDP growth (annual %) for USA/CHN
+async function fetchWBG_GDP_Growth(country3) {
+  const url = `https://api.worldbank.org/v2/country/${country3}/indicator/NY.GDP.MKTP.KD.ZG?format=json&per_page=1000`;
+  const j = await (await fetch(url)).json();
+  const rows = (j[1]||[]).filter(x=>x.value!=null);
+  const last = rows.slice(0,10).reverse().map(r => ({ time: r.date+'-01-01', value:+r.value }));
+  return { series: last, meta: { source:'World Bank', latency:'annual' } };
+}
+
+// ECB FX (EURUSD reference)
+async function fetchECB_EURUSD() {
+  const url = 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?format=jsondata&lastNObservations=5000';
+  const j = await (await fetch(url)).json();
+  const obs = j?.data?.series?.[0]?.observations || [];
+  const data = obs.map(o=>({ time:o[0], value:+o[1] })).filter(x=>!isNaN(x.value));
+  return { series: data, meta:{ source:'ECB', latency:'daily' } };
+}
+
+// Router
+async function loadInstrument(inst){
+  if (inst.type==='fred') return fetchFRED(inst.id);
+  if (inst.type==='wbg_gdp_growth') return fetchWBG_GDP_Growth(inst.id);
+  if (inst.id==='EURUSD') return fetchECB_EURUSD();
+  return fetchStooq(inst.id);
+}
+
+// -------------------- State & defaults --------------------
+const defaultState = {
+  range: '1Y',
+  pinned: ['^SPX','URTH.US','CL.F','EURUSD','AAPL.US'],
+  items: [
+    { id:'^SPX',    name:'S&P 500',      type:'stooq' },
+    { id:'CL.F',    name:'WTI Crude',    type:'stooq' },
+    { id:'AAPL.US', name:'Apple',        type:'stooq' },
+    { id:'EURUSD',  name:'EURUSD',       type:'ecb'   },
+    { id:'DGS5',    name:'US 5Y (FRED)', type:'fred'  },
+    { id:'USA',     name:'GDP growth: USA',   type:'wbg_gdp_growth', id:'USA' },
+    { id:'CHN',     name:'GDP growth: China', type:'wbg_gdp_growth', id:'CHN' }
+  ]
+};
+let state = JSON.parse(localStorage.getItem('dashState')||'null') || defaultState;
+
+// -------------------- Search & suggestions --------------------
+const localDict = [
+  {sym:'^SPX',      name:'S&P 500 (index)', source:'Stooq'},
+  {sym:'URTH.US',   name:'MSCI World (ETF URTH)', source:'Stooq'},
+  {sym:'AAPL.US',   name:'Apple', source:'Stooq'},
+  {sym:'MSFT.US',   name:'Microsoft', source:'Stooq'},
+  {sym:'GOOGL.US',  name:'Alphabet A', source:'Stooq'},
+  {sym:'NVDA.US',   name:'NVIDIA', source:'Stooq'},
+  {sym:'CL.F',      name:'WTI Crude (fut)', source:'Stooq'},
+  {sym:'EURUSD',    name:'EURUSD (ECB)', source:'ECB'},
+  {sym:'DGS5',      name:'US 5Y Treasury (FRED)', source:'FRED', type:'fred'},
+  {sym:'SP500',     name:'S&P 500 (FRED series)', source:'FRED', type:'fred'},
+  {sym:'IRLTLT01CZM156N', name:'CZ 10Y Govt Yield (OECD via FRED, monthly)', source:'FRED', type:'fred'},
+  {sym:'GDP_US_CN', name:'GDP growth US vs China (compare view)', source:'World Bank', type:'compare'}
+];
+
+function openSuggest(list){
+  const box = $('#suggest'); box.innerHTML='';
+  list.forEach(item=>{
+    const d = document.createElement('div');
+    d.innerHTML = `<b>${item.name||item.sym}</b> <span class="muted">· ${item.source}</span>
+                   <button style="float:right" class="btn">+ Add</button>`;
+    d.querySelector('.btn').onclick = (e)=>{
+      e.stopPropagation();
+      addInstrument(item);
+      box.style.display='none';
+      $('#q').value='';
+    };
+    d.onclick = ()=>{ $('#q').value=item.sym; };
+    box.appendChild(d);
+  });
+  box.style.display = list.length ? 'block':'none';
+}
+
+function addInstrument(item){
+  if (item.type==='compare' && item.sym==='GDP_US_CN'){
+    ensureItem({ id:'USA', name:'GDP growth: USA', type:'wbg_gdp_growth' });
+    ensureItem({ id:'CHN', name:'GDP growth: China', type:'wbg_gdp_growth' });
+    render(); drawCompareGDP();
+    return;
+  }
+  const key = (item.sym||item.id);
+  const exists = state.items.find(i => (i.id||i.sym) === key);
+  if (!exists){
+    if (item.type==='fred') state.items.push({ id:item.sym, name:item.name, type:'fred' });
+    else state.items.push({ id:item.sym, name:item.name||item.sym, type:'stooq' });
+    persist(); render();
+  }
+}
+
+function ensureItem(inst){
+  if (!state.items.find(i=> (i.id||i.sym) === inst.id)) { state.items.push(inst); persist(); }
+}
+
+$('#q').addEventListener('input', e=>{
+  const v = e.target.value.trim().toLowerCase();
+  if (!v){ $('#suggest').style.display='none'; return; }
+  const list = localDict.filter(x => (x.name||'').toLowerCase().includes(v) || (x.sym||'').toLowerCase().includes(v));
+  if (!list.length && /[.\^]/.test(v)) list.push({sym:e.target.value.trim(), name:e.target.value.trim(), source:'Stooq'});
+  openSuggest(list.slice(0,10));
+});
+
+function renderChips(){
+  const holder = $('#chips'); holder.innerHTML='';
+  state.pinned.forEach(sym=>{
+    const chip = document.createElement('button');
+    chip.className='chip'; chip.textContent=sym;
+    chip.onclick = ()=> addInstrument({ sym, name:sym, source:'Stooq' });
+    holder.appendChild(chip);
+  });
+}
+$('#pinManage').onclick = ()=>{
+  const sym = prompt('Edit quick-add chips (space-separated symbols, e.g., "^SPX URTH.US CL.F EURUSD AAPL.US")', state.pinned.join(' '));
+  if (sym!=null){ state.pinned = sym.split(/\s+/).filter(Boolean); persist(); renderChips(); }
+};
+
+// range chips
+$$('#rangeChips .chip').forEach(c=>{
+  c.onclick=()=>{
+    $$('#rangeChips .chip').forEach(x=>x.style.borderStyle='dashed');
+    c.style.borderStyle='solid';
+    state.range = c.getAttribute('data-range'); persist(); render();
+  };
+});
+
+// -------------------- Tiles & chart --------------------
+const cards = $('#cards');
+let chart = LightweightCharts.createChart($('#chart'), {
+  layout:{textColor:'#e6e6e6', background:{type:'Solid', color:'#0e1116'}},
+  rightPriceScale:{visible:true}, timeScale:{timeVisible:true,borderVisible:false}, grid:{vertLines:{visible:false},horzLines:{visible:false}}
+});
+let chartSeries = [];
+
+async function drawCompareGDP(){
+  clearChart(); $('#detailTitle').textContent = 'GDP growth: USA vs China'; $('#detailBadge').style.display='inline'; $('#detailBadge').textContent='World Bank · annual';
+  const [us,cn] = await Promise.all([fetchWBG_GDP_Growth('USA'), fetchWBG_GDP_Growth('CHN')]);
+  const sUS = chart.addSeries(LightweightCharts.LineSeries, { color:'#4ea1ff', lineWidth:2 });
+  const sCN = chart.addSeries(LightweightCharts.LineSeries, { color:'#ff8a4e', lineWidth:2 });
+  sUS.setData(us.series); sCN.setData(cn.series);
+  chartSeries = [sUS,sCN]; chart.timeScale().fitContent();
+}
+
+function clearChart(){ chartSeries.forEach(s=>chart.removeSeries(s)); chartSeries=[]; }
+
+async function render(){
+  cards.innerHTML='';
+  renderChips();
+  for (const it of state.items){
+    const tile = document.createElement('div'); tile.className='card';
+    tile.innerHTML = `<div class="row" style="justify-content:space-between">
+        <div><div class="tile-title">${it.name||it.id}</div>
+             <div class="muted" id="src-${it.id||it.name}"></div></div>
+        <div class="row">
+          <button class="chip" data-act="chart">Open</button>
+          <button class="chip" data-act="replace">Replace</button>
+          <button class="chip" data-act="remove">Remove</button>
+        </div>
+      </div>
+      <div class="row" style="gap:12px;margin-top:6px">
+        <div>Last: <span class="big" id="last-${it.id}">…</span></div>
+        <div id="chg-${it.id}" class="muted"></div>
+      </div>`;
+    cards.appendChild(tile);
+
+    tile.querySelector('[data-act="remove"]').onclick = ()=>{
+      state.items = state.items.filter(x=> x !== it); persist(); render();
+    };
+    tile.querySelector('[data-act="replace"]').onclick = async ()=>{
+      const sym = prompt('Replace with symbol or FRED series (e.g., AAPL.US, ^SPX, DGS5):');
+      if (!sym) return;
+      const isFRED = /^[A-Z0-9_.]+$/.test(sym) && !(/[.\^]/.test(sym));
+      const ni = isFRED ? { id:sym, name:sym, type:'fred' } : { id:sym, name:sym, type:'stooq' };
+      const idx = state.items.indexOf(it); state.items.splice(idx,1,ni); persist(); render();
+    };
+    tile.querySelector('[data-act="chart"]').onclick = ()=> openChart(it);
+
+    try{
+      const data = await loadInstrument(it);
+      const arr = toSeries(data.series);
+      const rng = cutByRange(arr, state.range);
+      if (rng.length){
+        const last = rng[rng.length-1].value, first = rng[0].value, chg = pct(first,last);
+        document.querySelector(`#last-${it.id}`).textContent = isFinite(last) ? (Math.abs(last)>=1000? last.toFixed(1) : last.toFixed(2)) : '—';
+        const el = document.querySelector(`#chg-${it.id}`); el.textContent = `${chg>=0?'+':''}${chg.toFixed(2)}% (${state.range})`;
+        el.className = chg>=0 ? 'ok' : 'bad';
+      }
+      document.querySelector(`#src-${it.id||it.name}`).textContent = `${data.meta.source} · ${data.meta.latency}`;
+    }catch(e){
+      document.querySelector(`#last-${it.id}`).textContent='N/A';
+      document.querySelector(`#chg-${it.id}`).textContent='Load failed';
+    }
+  }
+}
+
+async function openChart(it){
+  clearChart(); document.querySelector('#detailTitle').textContent = it.name||it.id; document.querySelector('#detailBadge').style.display='none';
+  const data = await loadInstrument(it); const arr = toSeries(data.series);
+  document.querySelector('#detailBadge').style.display='inline'; document.querySelector('#detailBadge').textContent = `${data.meta.source} · ${data.meta.latency}`;
+  const s = chart.addSeries(LightweightCharts.AreaSeries, { lineColor:'#4ea1ff', topColor:'rgba(78,161,255,0.35)', bottomColor:'rgba(78,161,255,0.02)' });
+  s.setData(arr); chartSeries=[s]; chart.timeScale().fitContent();
+}
+
+function persist(){ localStorage.setItem('dashState', JSON.stringify(state)); }
+
+// export
+$('#btnExport').onclick = ()=>{
+  chart.takeScreenshot().then(img=>{
+    const a=document.createElement('a'); a.href=img.toDataURL('image/png'); a.download='chart.png'; a.click();
+  });
+};
+
+// compare GDP shortcut
+$('#btnCompare').onclick = drawCompareGDP;
+
+// install PWA
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', (e)=>{ e.preventDefault(); deferredPrompt = e; document.getElementById('install').onclick=()=> deferredPrompt.prompt(); });
+
+// initialize
+render();
+</script>
+
+<script>
+// Register SW for offline cache
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', ()=> navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+}
+</script>
+</body>
+</html>
