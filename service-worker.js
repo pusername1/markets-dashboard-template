@@ -17,7 +17,7 @@ self.addEventListener('activate', e=>{
 
 self.addEventListener('fetch', e=>{
   const url = new URL(e.request.url);
-  const isJSON = url.pathname.startsWith('/data/');
+  const isJSON = url.pathname.includes('/data/');
   if (isJSON) {
     e.respondWith(fetch(e.request).then(r=>{
       const copy = r.clone(); caches.open(CACHE).then(c=>c.put(e.request, copy)); return r;

@@ -27,7 +27,6 @@
   .right{margin-left:auto}
   .btn{cursor:pointer}
   .badge{border:1px solid var(--border);border-radius:6px;padding:2px 6px;font-size:12px;color:var(--muted)}
-  .kbd{font-family:monospace;border:1px solid var(--border);border-radius:4px;padding:2px 6px;background:#0c1016;color:#cbd3de}
 </style>
 <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -35,7 +34,7 @@
 <header class="row">
   <strong style="font-size:16px">Markets</strong>
   <div class="row" style="position:relative;flex:1;min-width:280px">
-    <input id="q" type="search" placeholder="Search instrument (e.g., AAPL, ^SPX, EURUSD, US5Y, GDP_US_CN)" autocomplete="off" />
+    <input id="q" type="search" placeholder="Search instrument (e.g., AAPL, ^SPX, EURUSD, DGS10, GDP_US_CN)" autocomplete="off" />
     <div id="suggest" class="suggest" style="display:none"></div>
   </div>
   <div class="row" id="rangeChips">
@@ -55,6 +54,7 @@
   <div class="muted">Quick add:</div>
   <div id="chips" class="row" style="gap:6px"></div>
   <button id="pinManage" class="chip">Customize</button>
+  <button id="reset" class="chip">Reset</button>
 </section>
 
 <section id="cards" class="grid"></section>
@@ -81,9 +81,7 @@
 // -------------------- Utilities --------------------
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
-const today = new Date();
-const pad = n => String(n).padStart(2,'0');
-const fmtDate = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const domSafe = s => String(s).replace(/[^a-zA-Z0-9_-]/g,'_');
 const startOfMonth = d => new Date(d.getFullYear(), d.getMonth(), 1);
 const startOfQuarter = d => new Date(d.getFullYear(), Math.floor(d.getMonth()/3)*3, 1);
 const startOfYear = d => new Date(d.getFullYear(), 0, 1);
@@ -104,10 +102,20 @@ function cutByRange(arr, range){
 }
 
 // -------------------- Data fetchers --------------------
-// Stooq EOD CSV (e.g., AAPL.US, ^SPX, CL.F)
+// Stooq EOD CSV (with CORS fallback via r.jina.ai)
 async function fetchStooq(sym) {
-  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(sym.toLowerCase())}&i=d`;
-  const txt = await (await fetch(url)).text();
+  const primary = `https://stooq.com/q/d/l/?s=${encodeURIComponent(sym.toLowerCase())}&i=d`;
+  async function get(url){
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    return r.text();
+  }
+  let txt;
+  try { txt = await get(primary); }
+  catch(e){
+    const alt = `https://r.jina.ai/http://stooq.com/q/d/l/?s=${encodeURIComponent(sym.toLowerCase())}&i=d`;
+    txt = await get(alt);
+  }
   const lines = txt.trim().split('\n'); if (lines.length<2) throw new Error('No data');
   const data = lines.slice(1).map(l=>{
     const [date,open,high,low,close] = l.split(',');
@@ -116,9 +124,9 @@ async function fetchStooq(sym) {
   return { series: data, meta: { source:'Stooq', latency:'EOD' } };
 }
 
-// FRED cached JSON: /data/fred/<series>.json
+// FRED cached JSON: use relative path so it works under /<repo>/ on Pages
 async function fetchFRED(seriesId) {
-  const url = `/data/fred/${seriesId}.json?ts=${Date.now()}`;
+  const url = `data/fred/${seriesId}.json?ts=${Date.now()}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error('No cached FRED');
   const j = await r.json();
@@ -129,16 +137,25 @@ async function fetchFRED(seriesId) {
 // World Bank: GDP growth (annual %) for USA/CHN
 async function fetchWBG_GDP_Growth(country3) {
   const url = `https://api.worldbank.org/v2/country/${country3}/indicator/NY.GDP.MKTP.KD.ZG?format=json&per_page=1000`;
-  const j = await (await fetch(url)).json();
+  let j; try { j = await (await fetch(url)).json(); }
+  catch(e){
+    // fallback through r.jina.ai proxy
+    const alt = `https://r.jina.ai/http://api.worldbank.org/v2/country/${country3}/indicator/NY.GDP.MKTP.KD.ZG?format=json&per_page=1000`;
+    j = await (await fetch(alt)).json();
+  }
   const rows = (j[1]||[]).filter(x=>x.value!=null);
   const last = rows.slice(0,10).reverse().map(r => ({ time: r.date+'-01-01', value:+r.value }));
   return { series: last, meta: { source:'World Bank', latency:'annual' } };
 }
 
-// ECB FX (EURUSD reference)
+// ECB FX (EURUSD reference) with fallback
 async function fetchECB_EURUSD() {
   const url = 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?format=jsondata&lastNObservations=5000';
-  const j = await (await fetch(url)).json();
+  let j; try { j = await (await fetch(url)).json(); }
+  catch(e){
+    const alt = 'https://r.jina.ai/http://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?format=jsondata&lastNObservations=5000';
+    j = await (await fetch(alt)).json();
+  }
   const obs = j?.data?.series?.[0]?.observations || [];
   const data = obs.map(o=>({ time:o[0], value:+o[1] })).filter(x=>!isNaN(x.value));
   return { series: data, meta:{ source:'ECB', latency:'daily' } };
@@ -162,8 +179,8 @@ const defaultState = {
     { id:'AAPL.US', name:'Apple',        type:'stooq' },
     { id:'EURUSD',  name:'EURUSD',       type:'ecb'   },
     { id:'DGS5',    name:'US 5Y (FRED)', type:'fred'  },
-    { id:'USA',     name:'GDP growth: USA',   type:'wbg_gdp_growth', id:'USA' },
-    { id:'CHN',     name:'GDP growth: China', type:'wbg_gdp_growth', id:'CHN' }
+    { id:'USA',     name:'GDP growth: USA',   type:'wbg_gdp_growth' },
+    { id:'CHN',     name:'GDP growth: China', type:'wbg_gdp_growth' }
   ]
 };
 let state = JSON.parse(localStorage.getItem('dashState')||'null') || defaultState;
@@ -230,6 +247,7 @@ $('#q').addEventListener('input', e=>{
   openSuggest(list.slice(0,10));
 });
 
+// quick-add chips
 function renderChips(){
   const holder = $('#chips'); holder.innerHTML='';
   state.pinned.forEach(sym=>{
@@ -243,6 +261,7 @@ $('#pinManage').onclick = ()=>{
   const sym = prompt('Edit quick-add chips (space-separated symbols, e.g., "^SPX URTH.US CL.F EURUSD AAPL.US")', state.pinned.join(' '));
   if (sym!=null){ state.pinned = sym.split(/\s+/).filter(Boolean); persist(); renderChips(); }
 };
+$('#reset').onclick = ()=>{ localStorage.removeItem('dashState'); state = JSON.parse(JSON.stringify(defaultState)); render(); };
 
 // range chips
 $$('#rangeChips .chip').forEach(c=>{
@@ -276,10 +295,11 @@ async function render(){
   cards.innerHTML='';
   renderChips();
   for (const it of state.items){
+    const dom = domSafe(it.id||it.name);
     const tile = document.createElement('div'); tile.className='card';
     tile.innerHTML = `<div class="row" style="justify-content:space-between">
         <div><div class="tile-title">${it.name||it.id}</div>
-             <div class="muted" id="src-${it.id||it.name}"></div></div>
+             <div class="muted" id="src-${dom}"></div></div>
         <div class="row">
           <button class="chip" data-act="chart">Open</button>
           <button class="chip" data-act="replace">Replace</button>
@@ -287,8 +307,8 @@ async function render(){
         </div>
       </div>
       <div class="row" style="gap:12px;margin-top:6px">
-        <div>Last: <span class="big" id="last-${it.id}">…</span></div>
-        <div id="chg-${it.id}" class="muted"></div>
+        <div>Last: <span class="big" id="last-${dom}">…</span></div>
+        <div id="chg-${dom}" class="muted"></div>
       </div>`;
     cards.appendChild(tile);
 
@@ -310,14 +330,19 @@ async function render(){
       const rng = cutByRange(arr, state.range);
       if (rng.length){
         const last = rng[rng.length-1].value, first = rng[0].value, chg = pct(first,last);
-        document.querySelector(`#last-${it.id}`).textContent = isFinite(last) ? (Math.abs(last)>=1000? last.toFixed(1) : last.toFixed(2)) : '—';
-        const el = document.querySelector(`#chg-${it.id}`); el.textContent = `${chg>=0?'+':''}${chg.toFixed(2)}% (${state.range})`;
-        el.className = chg>=0 ? 'ok' : 'bad';
+        const lastEl = document.getElementById(`last-${dom}`);
+        lastEl.textContent = isFinite(last) ? (Math.abs(last)>=1000? last.toFixed(1) : last.toFixed(2)) : '—';
+        const chgEl = document.getElementById(`chg-${dom}`);
+        chgEl.textContent = `${chg>=0?'+':''}${chg.toFixed(2)}% (${state.range})`;
+        chgEl.className = chg>=0 ? 'ok' : 'bad';
       }
-      document.querySelector(`#src-${it.id||it.name}`).textContent = `${data.meta.source} · ${data.meta.latency}`;
+      const srcEl = document.getElementById(`src-${dom}`);
+      srcEl.textContent = `${data.meta.source} · ${data.meta.latency}`;
     }catch(e){
-      document.querySelector(`#last-${it.id}`).textContent='N/A';
-      document.querySelector(`#chg-${it.id}`).textContent='Load failed';
+      const lastEl = document.getElementById(`last-${dom}`);
+      const chgEl = document.getElementById(`chg-${dom}`);
+      if (lastEl) lastEl.textContent='N/A';
+      if (chgEl) chgEl.textContent='Load failed';
     }
   }
 }
