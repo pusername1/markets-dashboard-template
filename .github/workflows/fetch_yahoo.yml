@@ -1,0 +1,49 @@
+name: Fetch Yahoo (cache JSON under /data/yahoo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated symbols (e.g., AAPL,MSFT,SPY)"
+        required: true
+  schedule:
+    - cron: '5 * * * *'
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  yf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: python -m pip install --upgrade pip yfinance
+      - name: Fetch & write JSON
+        run: |
+          python - << 'PY'
+          import os, json
+          import yfinance as yf
+          os.makedirs('data/yahoo', exist_ok=True)
+          syms = (os.environ.get('SYMS') or '').split(',')
+          for s in [x.strip() for x in syms if x.strip()]:
+            tk = yf.Ticker(s)
+            hist = tk.history(period='max', interval='1d', auto_adjust=False)
+            out = {'symbol': s, 'prices': []}
+            for dt, row in hist.iterrows():
+              out['prices'].append({'date': str(dt.date()), 'close': float(row['Close'])})
+            with open(f'data/yahoo/{s}.json','w') as f: json.dump(out, f)
+          PY
+        env:
+          SYMS: ${{ github.event.inputs.symbols || 'AAPL,MSFT,SPY' }}
+      - name: Commit
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: "chore(data): refresh Yahoo cache"
+          file_pattern: data/yahoo/*.json
