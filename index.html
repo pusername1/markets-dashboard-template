@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Markets v2 — Charts Only</title>
+<meta name="theme-color" content="#0e1116" />
+<link rel="manifest" href='data:application/manifest+json,{"name":"Markets v2","short_name":"Markets","display":"standalone"}'>
+<style>
+  :root{--bg:#0e1116;--panel:#151922;--card:#171b22;--text:#e6e6e6;--muted:#aab3c0;--border:#2a3546;--accent:#4ea1ff;--ok:#53d17a;--bad:#ff6f6f}
+  *{box-sizing:border-box} html,body{height:100%} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Arial}
+  header{display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(14,17,22,.85);backdrop-filter:blur(6px);z-index:10}
+  h1{font-size:16px;margin:0 10px 0 0}
+  .btn{cursor:pointer;background:#11151c;border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 10px}
+  .btn:hover{border-color:#3a4862}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .stack{display:flex;flex-direction:column;gap:12px;padding:12px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px}
+  .muted{color:var(--muted)}
+  details.settings{margin-left:auto}
+  input,select{background:#0f141b;border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px}
+  label{font-size:12px;color:var(--muted)}
+  .toolbar{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .chips>button{background:#11151c;border:1px dashed var(--border)}
+  .danger{border-color:#5e2c2c;color:#ff9f9f}
+  .sep{opacity:.4}
+  .chart{height:360px}
+  .badge{font-size:12px;color:var(--muted)}
+</style>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+
+<header>
+  <h1>Markets v2</h1>
+  <button class="btn" id="addChart">+ Add chart</button>
+  <div class="chips row">
+    <button class="btn" data-range="1M">1M</button>
+    <button class="btn" data-range="3M">3M</button>
+    <button class="btn" data-range="6M">6M</button>
+    <button class="btn" data-range="YTD">YTD</button>
+    <button class="btn" data-range="1Y">1Y</button>
+    <button class="btn" data-range="5Y">5Y</button>
+    <button class="btn" data-range="MAX">MAX</button>
+  </div>
+  <details class="settings">
+    <summary class="btn">Settings</summary>
+    <div class="card" style="margin-top:8px;min-width:280px">
+      <div class="field">
+        <label>FRED API key (stored locally)</label>
+        <input id="fredKey" type="password" placeholder="32-char key" />
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="saveSettings">Save</button>
+        <button class="btn" id="exportCfg">Export JSON</button>
+        <button class="btn danger" id="importCfg">Import JSON</button>
+        <button class="btn danger" id="resetAll">Reset</button>
+      </div>
+      <p class="muted" style="margin-top:8px">
+        FRED requires a personal API key for direct calls; paste it once here (kept in your browser only).
+      </p>
+    </div>
+  </details>
+</header>
+
+<main class="stack" id="stack"></main>
+
+<script>
+const $ = s => document.querySelector(s);
+const el = (tag, cls) => { const n = document.createElement(tag); if (cls) n.className = cls; return n; };
+const parseNum = v => (v===null||v===undefined||v===''||isNaN(+v)) ? null : +v;
+
+const storage = { load(){ try{ return JSON.parse(localStorage.getItem('v2cfg')||'{}'); }catch{return {}} }, save(cfg){ localStorage.setItem('v2cfg', JSON.stringify(cfg)); } };
+let cfg = storage.load(); cfg.range = cfg.range || '1Y'; cfg.charts = cfg.charts || []; cfg.settings = cfg.settings || { fredKey: cfg.settings?.fredKey || '' };
+
+// -------- Providers (all return {series:[{time, value}], meta:{source,note}}) --------
+async function loadECB(key){
+  const url = `https://data-api.ecb.europa.eu/service/data/${encodeURIComponent(key)}?format=SDMX-CSV&detail=dataonly&lastNObservations=20000`;
+  const txt = await fetch(url).then(r=>{ if(!r.ok) throw new Error('ECB '+r.status); return r.text(); });
+  const lines = txt.trim().split(/\r?\n/); if (lines.length<2) throw new Error('ECB empty');
+  const head = lines[0].split(','), t=head.indexOf('TIME_PERIOD'), v=head.indexOf('OBS_VALUE');
+  if (t<0 || v<0) throw new Error('ECB header mismatch');
+  const series = lines.slice(1).map(line => { const c=line.split(','), d=c[t], val=parseNum(c[v]); return (d && val!=null) ? { time:d, value:val } : null; }).filter(Boolean);
+  return { series, meta:{ source:'ECB', note:'SDMX-CSV' } };
+}
+async function loadFRED(seriesId){
+  const key = cfg.settings.fredKey?.trim(); if (!key) throw new Error('FRED: set API key in Settings.');
+  const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${encodeURIComponent(seriesId)}&api_key=${encodeURIComponent(key)}&file_type=json`;
+  const j = await fetch(url).then(r=>{ if(!r.ok) throw new Error('FRED '+r.status); return r.json(); });
+  const series = (j.observations||[]).map(o => { const val = parseNum(o.value); return val==null ? null : { time:o.date, value:val }; }).filter(Boolean);
+  return { series, meta:{ source:'FRED', note:'API v1' } };
+}
+async function loadWBG(spec){
+  const [iso3, ind] = spec.split(':'); if(!iso3 || !ind) throw new Error('World Bank: use ISO3:INDICATOR (e.g., CZE:NY.GDP.MKTP.KD.ZG)');
+  const url = `https://api.worldbank.org/v2/country/${encodeURIComponent(iso3)}/indicator/${encodeURIComponent(ind)}?format=json&per_page=20000`;
+  const j = await fetch(url).then(r=>{ if(!r.ok) throw new Error('WBG '+r.status); return r.json(); });
+  const data = (j[1]||[]).filter(x=>x.value!=null).map(x => ({ time: `${x.date}-01-01`, value:+x.value })).reverse();
+  return { series:data, meta:{ source:'World Bank', note:ind } };
+}
+async function loadStooq(symbol){
+  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol.toLowerCase())}&i=d`;
+  const txt = await fetch(url).then(r=>{ if(!r.ok) throw new Error('Stooq '+r.status); return r.text(); });
+  const lines = txt.trim().split(/\r?\n/); if(lines.length<2 || lines[0].toLowerCase().indexOf('date,open,high,low,close')!==0) throw new Error('Stooq empty/format');
+  const series = lines.slice(1).map(l=>{ const [d, , , , c] = l.split(','); const v = parseNum(c); return (d && v!=null) ? { time:d, value:v } : null; }).filter(Boolean);
+  return { series, meta:{ source:'Stooq', note:'EOD' } };
+}
+async function loadYahoo(symbol){
+  try{ // cached
+    const j = await fetch(`data/yahoo/${encodeURIComponent(symbol)}.json?ts=${Date.now()}`).then(r=> r.ok ? r.json() : Promise.reject());
+    const series = (j.prices||[]).map(p => ({ time:p.date, value:+p.close })).filter(d=>!isNaN(d.value));
+    if (series.length) return { series, meta:{ source:'Yahoo (cached)', note:'Actions' } };
+  }catch(_){ }
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=max`;
+  const j = await fetch(url, { headers:{'Accept':'application/json'} }).then(r=>{ if(!r.ok) throw new Error('Yahoo '+r.status+' (may be CORS)'); return r.json(); });
+  const res = j?.chart?.result?.[0]; if (!res?.timestamp || !res?.indicators?.quote?.[0]?.close) throw new Error('Yahoo: malformed');
+  const ts = res.timestamp, close = res.indicators.quote[0].close;
+  const series = ts.map((t,i)=> { const v = parseNum(close[i]); if (v==null) return null; const d = new Date(t*1000).toISOString().slice(0,10); return { time:d, value:v }; }).filter(Boolean);
+  return { series, meta:{ source:'Yahoo (live)', note:'Unofficial' } };
+}
+
+// -------- transforms --------
+function sliceByRange(data, range){
+  if (range==='MAX') return data;
+  const end = new Date(); let start; const addMonths = m => new Date(end.getFullYear(), end.getMonth()-m, end.getDate());
+  if (range==='1M') start = addMonths(1); else if (range==='3M') start = addMonths(3); else if (range==='6M') start = addMonths(6);
+  else if (range==='YTD') start = new Date(end.getFullYear(),0,1); else if (range==='1Y') start = addMonths(12); else if (range==='5Y') start = addMonths(60); else start = new Date(0);
+  return data.filter(p => new Date(p.time) >= start);
+}
+function normalizeBase(series, baseDate){
+  const baseIdx = series.findIndex(p => p.time >= baseDate); const idx = baseIdx>=0 ? baseIdx : 0; const base = series[idx]?.value ?? null;
+  if (base==null || !isFinite(base)) return series; const k = 100 / base; return series.map(p => ({ time:p.time, value: p.value * k }));
+}
+function movingAverage(series, win){ if (!win || win<2) return []; const out = []; let acc = 0, q = []; for (const p of series){ q.push(p.value); acc += p.value; if (q.length>win) acc -= q.shift(); if (q.length===win) out.push({ time:p.time, value: acc/win }); } return out; }
+
+function hex2rgba(hex,a){ const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex); if(!m) return 'rgba(78,161,255,'+a+')'; const r=parseInt(m[1],16), g=parseInt(m[2],16), b=parseInt(m[3],16); return `rgba(${r},${g},${b},${a})`; }
+
+// -------- chart component --------
+function ChartBlock(init){
+  const state = Object.assign({ provider: 'stooq', id: 'AAPL.US', cmpProvider: '', cmpId: '', normalize: false, baseDate: '2020-01-01', ma: 0, color: '#4ea1ff', range: cfg.range }, init||{});
+  const host = el('section','card');
+  const tb = el('div','toolbar');
+  const pSel = el('select'); pSel.innerHTML = `\n    <option value="ecb">ECB (SDMX)</option>\n    <option value="fred">FRED</option>\n    <option value="wbg">World Bank</option>\n    <option value="stooq">Stooq</option>\n    <option value="yahoo">Yahoo Finance</option>`; pSel.value = state.provider;
+  const idIn = el('input'); idIn.placeholder = { ecb:'EXR/D.USD.EUR.SP00.A', fred:'SP500 or DGS10', wbg:'CZE:NY.GDP.MKTP.KD.ZG', stooq:'AAPL.US or ^SPX', yahoo:'AAPL or MSFT' }[state.provider]; idIn.value = state.id;
+  const cmpWrap = el('div','row'); const cmpLbl = el('label'); cmpLbl.textContent = 'Compare (optional)'; const cmpSel = el('select'); cmpSel.innerHTML = pSel.innerHTML; cmpSel.value = state.cmpProvider||state.provider; const cmpIn  = el('input'); cmpIn.placeholder = 'second series ID'; cmpIn.value = state.cmpId||''; cmpWrap.append(cmpLbl, cmpSel, cmpIn);
+  const normWrap = el('div','row'); const normChk = el('input'); normChk.type='checkbox'; normChk.checked = state.normalize; const normLbl = el('label'); normLbl.textContent='Normalize @'; const baseIn = el('input'); baseIn.type='date'; baseIn.value = state.baseDate; normWrap.append(normChk, normLbl, baseIn);
+  const maWrap = el('div','row'); const maLbl = el('label'); maLbl.textContent='Moving Avg'; const maIn = el('input'); maIn.type='number'; maIn.min='0'; maIn.placeholder='window'; maIn.style.width='80px'; maIn.value = state.ma||''; maWrap.append(maLbl, maIn);
+  const colorIn = el('input'); colorIn.type='color'; colorIn.value = state.color;
+  const span = el('span','sep'); span.textContent='|'; const rmBtn = el('button'); rmBtn.className='btn danger'; rmBtn.textContent='Remove'; const srcBadge = el('span','badge'); srcBadge.textContent='';
+  function lab(txt, ctl){ const w = el('div','field'); const l=el('label'); l.textContent=txt; w.append(l,ctl); return w; }
+  tb.append(lab('Provider', pSel), lab('ID', idIn), cmpWrap, normWrap, maWrap, lab('Color', colorIn), span, rmBtn, el('span'), srcBadge);
+  host.append(tb);
+
+  const chartEl = el('div','chart'); host.append(chartEl);
+  const chart = LightweightCharts.createChart(chartEl, { layout:{ background:{type:'Solid',color:'#0e1116'}, textColor:'#e6e6e6' }, grid:{ vertLines:{color:'#1a2230'}, horzLines:{color:'#1a2230'} }, rightPriceScale:{ borderVisible:false }, timeScale:{ borderVisible:false, timeVisible:true } });
+  let mainSeries = chart.addAreaSeries({ lineColor: state.color, topColor:'rgba(78,161,255,.35)', bottomColor:'rgba(78,161,255,.02)' });
+  let cmpSeries, maSeries;
+
+  function persist(){ state.provider = pSel.value.trim(); state.id = idIn.value.trim(); state.cmpProvider = cmpIn.value.trim()? cmpSel.value.trim(): ''; state.cmpId = cmpIn.value.trim(); state.normalize = normChk.checked; state.baseDate = baseIn.value || '2020-01-01'; state.ma = +maIn.value || 0; state.color = colorIn.value || '#4ea1ff'; cfg.charts[idx] = state; storage.save(cfg); }
+  async function fetchSeries(provider, id){ if (!id) return { series:[], meta:{source:provider} }; if (provider==='ecb') return loadECB(id); if (provider==='fred') return loadFRED(id); if (provider==='wbg') return loadWBG(id); if (provider==='stooq') return loadStooq(id); if (provider==='yahoo') return loadYahoo(id); throw new Error('Unknown provider'); }
+  async function refresh(){ persist(); srcBadge.textContent = 'loading…'; mainSeries.setData([]); if (cmpSeries){ chart.removeSeries(cmpSeries); cmpSeries=null; } if (maSeries){ chart.removeSeries(maSeries); maSeries=null; }
+    try{ const main = await fetchSeries(state.provider, state.id); let s = sliceByRange(main.series, cfg.range); if (state.normalize) s = normalizeBase(s, state.baseDate); mainSeries.setData(s); mainSeries.applyOptions({ lineColor: state.color, topColor:`${hex2rgba(state.color,.35)}`, bottomColor:`${hex2rgba(state.color,.02)}` }); if (state.cmpId){ const cmpr = await fetchSeries(state.cmpProvider||state.provider, state.cmpId); let sc = sliceByRange(cmpr.series, cfg.range); if (state.normalize) sc = normalizeBase(sc, state.baseDate); cmpSeries = chart.addLineSeries({ color:'#ff8a4e', lineWidth:2 }); cmpSeries.setData(sc); } if (state.ma && state.ma>=2){ const ma = movingAverage(s, state.ma); maSeries = chart.addLineSeries({ color:'#bbb', lineWidth:1, lineStyle: LightweightCharts.LineStyle.Dotted }); maSeries.setData(ma); } srcBadge.textContent = `${main.meta.source}${main.meta.note?' · '+main.meta.note:''}`; chart.timeScale().fitContent(); }catch(e){ srcBadge.textContent = 'error'; console.error(e); alert(e.message); }
+  }
+  [pSel,idIn,cmpSel,cmpIn,normChk,baseIn,maIn,colorIn].forEach(x => x.addEventListener('change', refresh));
+  const rmBtnHandler = ()=>{ const i = cfg.charts.indexOf(state); if (i>=0){ cfg.charts.splice(i,1); storage.save(cfg); renderAll(); } };
+  rmBtn.addEventListener('click', rmBtnHandler);
+
+  let idx = cfg.charts.length; return { host, refresh, setIndex(i){ idx=i; } };
+}
+
+function sliceByRange(data, range){ if (range==='MAX') return data; const end = new Date(); let start; const addMonths = m => new Date(end.getFullYear(), end.getMonth()-m, end.getDate()); if (range==='1M') start = addMonths(1); else if (range==='3M') start = addMonths(3); else if (range==='6M') start = addMonths(6); else if (range==='YTD') start = new Date(end.getFullYear(),0,1); else if (range==='1Y') start = addMonths(12); else if (range==='5Y') start = addMonths(60); else start = new Date(0); return data.filter(p => new Date(p.time) >= start); }
+
+const stack = $('#stack'); let blocks = [];
+function addChart(initial){ const block = ChartBlock(initial); blocks.push(block); stack.append(block.host); block.setIndex(blocks.length-1); block.refresh(); storage.save(cfg); }
+function renderAll(){ stack.innerHTML=''; blocks=[]; cfg.charts.forEach(c => addChart(c)); if (!cfg.charts.length) addChart({ provider:'stooq', id:'^SPX', baseDate:'2020-01-01' }); document.querySelectorAll('.chips .btn').forEach(b => b.style.border = (b.dataset.range===cfg.range)?'1px solid var(--accent)':'1px dashed var(--border)'); }
+
+$('#addChart').onclick = ()=> addChart({ provider:'stooq', id:'AAPL.US' });
+document.querySelectorAll('.chips .btn').forEach(b => b.onclick = ()=>{ cfg.range = b.dataset.range; storage.save(cfg); renderAll(); });
+
+$('#fredKey').value = cfg.settings.fredKey||'';
+$('#saveSettings').onclick = ()=>{ cfg.settings.fredKey = $('#fredKey').value.trim(); storage.save(cfg); alert('Saved.'); renderAll(); };
+$('#exportCfg').onclick = ()=> { const a = document.createElement('a'); a.href='data:application/json,'+encodeURIComponent(JSON.stringify(cfg,null,2)); a.download='markets-v2-config.json'; a.click(); };
+$('#importCfg').onclick = async ()=>{ const f = document.createElement('input'); f.type='file'; f.accept='.json,application/json'; f.onchange= async ()=> { const txt = await f.files[0].text(); cfg = JSON.parse(txt); storage.save(cfg); location.reload(); }; f.click(); };
+$('#resetAll').onclick = ()=>{ if(confirm('Reset all charts & settings?')){ localStorage.removeItem('v2cfg'); location.reload(); } };
+
+renderAll();
+if ('serviceWorker' in navigator) { window.addEventListener('load', ()=> navigator.serviceWorker.register('./service-worker.js').catch(()=>{})); }
+</script>
+</body>
+</html>
